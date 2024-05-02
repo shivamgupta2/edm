@@ -1,0 +1,1 @@
+torchrun --standalone --nproc_per_node=1 generate.py --outdir=fid-tmp --seeds=5-7 --subdirs --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-uncond-ve.pkl --solver=euler --disc=ve --schedule=ve --scaling=none --steps=300

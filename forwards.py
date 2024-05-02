@@ -36,7 +36,7 @@ class SuperResolution:
         num_channels = x.shape[1]
         dim = x.shape[-1]
         new_dim = dim//self.factor
-        helper_x = torch.reshape(batch_size, num_channels, new_dim, self.factor, new_dim, self.factor)
-        res = torch.mean(helper_x, dim=(2, 4))
+        helper_x = torch.reshape(x, (batch_size, num_channels, new_dim, self.factor, new_dim, self.factor))
+        res = torch.mean(helper_x, dim=(3, 5))
         return res
-
+   
