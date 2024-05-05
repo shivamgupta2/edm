@@ -21,7 +21,7 @@ import math
 import glob
 import random
 from torch_utils import distributed as dist
-from forwards import Inpainting
+from forwards import Inpainting, SuperResolution
 import torchvision.transforms.functional as TF
 from torch.distributions.multivariate_normal import MultivariateNormal
 
@@ -66,7 +66,7 @@ def edm_sampler(
     return x_next
 
 def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_particles, num_channels, row_dim, col_dim,
-    net, latents, class_labels=None, randn_like=torch.randn_like,
+    net, latents, return_all_particles=False, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=None, sigma_max=None, rho=7,
     solver='heun', discretization='edm', schedule='linear', scaling='none',
     epsilon_s=1e-3, C_1=0.001, C_2=0.008, M=1000, alpha=1,
@@ -147,7 +147,8 @@ def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_partic
 
     batch_size = y.shape[0]
     num_y_channels = y.shape[1]
-    y_dim = y.shape[2]
+    y_dim = y.shape[2] * y.shape[3]
+    print('y shape:', y.shape)
     # Compute final time steps based on the corresponding noise levels.
     t_steps = sigma_inv(net.round_sigma(sigma_steps))
     t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]) # t_N = 0
@@ -168,13 +169,15 @@ def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_partic
     cond_samples_shaped = torch.reshape(cond_samples, (batch_size * num_samples * num_particles, num_channels, row_dim, col_dim))
     denoised = net(cond_samples_shaped/s(t_hat), sigma(t_hat), class_labels).to(torch.float64)
     x_0_given_x_T = denoised
+    print('x-0 shape:', x_0_given_x_T.shape)
     #x_0_given_x_T = (1/s(t_cur)) * (cond_samples_shaped + (s(t_cur)**2) * (denoised - cond_samples_shaped))
     #A_x_0_given_x_T = torch.mul(measurement_A, torch.reshape(x_0_given_x_T, (num_samples * num_particles, num_channels, row_dim * col_dim)))
-    A_x_0_given_x_T = measurement_A(torch.reshape(x_0_given_x_T, (batch_size, num_samples * num_particles, num_channels, row_dim * col_dim)))
-    A_x_0_given_x_T = torch.reshape(A_x_0_given_x_T, (batch_size, num_samples, num_particles, num_y_channels * y_dim))
-    x_0_given_x_T = torch.reshape(x_0_given_x_T, (batch_size, num_samples, num_particles, num_channels * row_dim * col_dim))
+    #A_x_0_given_x_T = measurement_A(torch.reshape(x_0_given_x_T, (batch_size, num_samples * num_particles, num_channels, row_dim * col_dim)))
+    A_x_0_given_x_T = measurement_A(x_0_given_x_T)
+    #A_x_0_given_x_T = torch.reshape(A_x_0_given_x_T, (batch_size, num_samples, num_particles, num_y_channels * y_dim))
+    #x_0_given_x_T = torch.reshape(x_0_given_x_T, (batch_size, num_samples, num_particles, num_channels * row_dim * col_dim))
 
-    log_Tilde_p_T = vectorized_gaussian_log_pdf(y, A_x_0_given_x_T, measurement_var)
+    log_Tilde_p_T = vectorized_gaussian_log_pdf(y, torch.reshape(A_x_0_given_x_T, (batch_size, num_samples, num_particles, num_channels* y_dim)), measurement_var)
 
     log_w = log_Tilde_p_T
     
@@ -189,6 +192,7 @@ def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_partic
     
         resampled_indices = vectorized_random_choice(w, device=latents.device)
 
+
         cond_samples = cond_samples[torch.arange(batch_size, device=latents.device)[:, None, None], torch.arange(num_samples, device=latents.device)[None, :,None], resampled_indices]
         log_Tilde_p_T = log_Tilde_p_T[torch.arange(batch_size, device=latents.device)[:, None, None], torch.arange(num_samples, device=latents.device)[None, :,None], resampled_indices]
 
@@ -196,10 +200,12 @@ def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_partic
 
         x_hat = torch.reshape(cond_samples, (batch_size * num_samples * num_particles, num_channels, row_dim, col_dim))
         denoised = net(x_hat / s(t_hat), sigma(t_hat), class_labels).to(torch.float64)
-        x_0_given_x_T = torch.reshape(denoised, (batch_size, num_samples, num_particles, num_channels * row_dim * col_dim))
+        x_0_given_x_T = denoised
+        #x_0_given_x_T = torch.reshape(denoised, (batch_size, num_samples, num_particles, num_channels * row_dim * col_dim))
         #x_0_given_x_T = (1/s(t_hat)) * (cond_samples + (s(t_hat)**2) * (denoised_shaped - cond_samples))
         #A_x_0_given_x_T = torch.mul(measurement_A, torch.reshape(x_0_given_x_T, (num_samples * num_particles, num_y_channels, row_dim * col_dim)))
-        A_x_0_given_x_T = measurement_A(torch.reshape(x_0_given_x_T, (batch_size, num_samples * num_particles, num_channels, row_dim * col_dim)))
+        #A_x_0_given_x_T = measurement_A(torch.reshape(x_0_given_x_T, (batch_size, num_samples * num_particles, num_channels, row_dim * col_dim)))
+        A_x_0_given_x_T = measurement_A(x_0_given_x_T)
         A_x_0_given_x_T = torch.reshape(A_x_0_given_x_T, (batch_size, num_samples, num_particles, num_y_channels * y_dim))
         norm_calc = -(1/(2 * measurement_var)) * torch.norm(y[:, None, None, :] - A_x_0_given_x_T, dim=-1)**2
         norm_calc_sum = torch.sum(norm_calc)
@@ -239,8 +245,10 @@ def twisted_diffusion(measurement_A, measurement_var, y, num_samples, num_partic
 
         #cond_samples = cond_samples.requires_grad_(False)
 
-        
-    cond_samples = cond_samples[:, :,0,:].reshape((batch_size, num_samples, num_channels, row_dim, col_dim))
+    if not return_all_particles:
+        cond_samples = cond_samples[:, :,0,:].reshape((batch_size, num_samples, num_channels, row_dim, col_dim))
+    else:
+        cond_samples = torch.reshape(cond_samples, (batch_size, num_samples * num_particles, num_channels, row_dim, col_dim))
     return cond_samples
 
 #----------------------------------------------------------------------------
@@ -382,7 +390,7 @@ def vectorized_gaussian_score(measurement_A, x, means, var):
     if x.shape == means.shape:
         deviations = - (x - means)
     else:
-        deviations = -(x[None, None, :] -means)
+        deviations = -(x[:, None, None, :] -means)
     return deviations/var
 
 def vectorized_random_choice(probs, device):
@@ -646,7 +654,7 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     #dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
     #path = '/work/09563/shivamgupta/ls6/edm/CIFAR-10-images/**/*.jpg'
     path = './CIFAR-10-images/test/cat/0000.jpg'
-    num_images = 1000
+    num_images = 10000
     particle_count = 5
     batch_size = 100
     noise_frac = 0.9
@@ -668,33 +676,49 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     mask = torch.hstack((torch.zeros(num_zeros, dtype=torch.bool, device=device), torch.ones(num_ones, dtype=torch.bool, device=device)))
     mask = mask[torch.randperm(row_dim * col_dim)]
     masks[0] = mask
+    super_res_factor = 4
+    small_res_dim = row_dim//super_res_factor
     
     #A = torch.rand((row_dim, col_dim), device=device) > noise_frac
-    inpainting_utils = Inpainting(masks, (1, num_channels, row_dim * col_dim,))
+    #inpainting_utils = Inpainting(masks, (1, num_channels, row_dim * col_dim,))
+    super_res_utils = SuperResolution(super_res_factor, (1, num_channels, row_dim, col_dim))
     #A = torch.reshape(A, (row_dim * col_dim,))
     #A[50:400, 50:400] = torch.zeros(122500).reshape((350, 350))
-    noise = math.sqrt(measurement_var) * torch.randn((1, num_channels, num_ones), device=device)
+    noise = math.sqrt(measurement_var) * torch.randn((1, num_channels, small_res_dim, small_res_dim), device=device)
     #cur_image = images[0].reshape((num_channels, row_dim * col_dim))
-    cur_image = true_image.reshape((1, num_channels, row_dim * col_dim))
-    measurements = inpainting_utils.forward(cur_image) + noise
-    measurement_adjoint = inpainting_utils.adjoint(measurements, device)
-    #measurement_adjoint = torch.reshape(measurement_adjoint, (batch_size, num_channels, row_dim, col_dim))
-    measurement_adjoint = torch.reshape(measurement_adjoint, (1, num_channels, row_dim, col_dim))
-    adjoint_f = open('adjoint_pickle', 'wb+')
-    pickle.dump(measurement_adjoint, adjoint_f)
-    for particle_count in range(50, 101, 5):
+    cur_image = true_image.reshape((1, num_channels, row_dim, col_dim))
+    print('here:', true_image.shape)
+    #measurements = super_res_utils.forward(cur_image) + noise
+    with open('measurements_pickle_2', 'rb') as measurements_f:
+        measurements = pickle.load(measurements_f).to(device)
+
+    #measurements = inpainting_utils.forward(cur_image) + noise
+    #measurement_adjoint = super_res_utils.adjoint(measurements)
+    #measurement_adjoint = torch.reshape(measurement_adjoint, (1, num_channels, row_dim, col_dim))
+    #for batch_ind in range(len(measurement_adjoint)):
+    #    adjoint_np = (measurement_adjoint[batch_ind] * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(1, 2, 0).cpu().numpy() 
+    #    PIL.Image.fromarray(adjoint_np, 'RGB').save('super_res_adjoint_2.png')
+
+    #measurements_f = open('measurements_pickle_2', 'wb+')
+    #pickle.dump(measurements, measurements_f)
+
+    for particle_count in range(100, 101, 99):
         batch_size = int(500/particle_count)
-        for ind in range(700, num_images, batch_size):
-            print('batch_size here:', batch_size)
-            #img_batch = torch.zeros((batch_size, num_channels, row_dim, col_dim), device=device)
-            #for batch_ind in range(batch_size):
-            #    k = random.choice(glob.glob(path, recursive=True))
-            #    print(k)
-            #    img = PIL.Image.open(k)
-            #    cur_image = TF.to_tensor(img)
-            #    cur_image = (cur_image - 0.5) * 2
-            #    img_batch[batch_ind] = cur_image
+        for ind in range(300, num_images, batch_size):
+            print('batch_size here:', batch_size, ', particle size here:', particle_count)
+            path = './CIFAR-10-images/test/cat/*.jpg'
+            img_batch = torch.zeros((batch_size, num_channels, row_dim, col_dim), device=device)
+            for batch_ind in range(batch_size):
+                k = random.choice(glob.glob(path, recursive=True))
+                print(k)
+                img = PIL.Image.open(k)
+                cur_image = TF.to_tensor(img)
+                cur_image = (cur_image - 0.5) * 2
+                img_batch[batch_ind] = cur_image
             torch.distributed.barrier()
+            super_res_utils = SuperResolution(super_res_factor, (batch_size, num_channels, row_dim, col_dim))
+            noise = math.sqrt(measurement_var) * torch.randn((batch_size, num_channels, small_res_dim, small_res_dim), device=device)
+            measurements = super_res_utils.forward(img_batch) + noise
             #batch_seeds = torch.tensor([0, 1], device=device)
             #batch_size = len(batch_seeds)
             #if batch_size == 0:
@@ -741,34 +765,39 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
 
             num_samples = batch_size
             num_particles = particle_count
-            cur_out_dir = outdir + '_particle_count=' + str(num_particles) + '_noise_frac=' + str(float(noise_frac)) + '_measurement_var:' + str(float(measurement_var))
+            #cur_out_dir = outdir + '_particle_count=' + str(num_particles) + '_noise_frac=' + str(float(noise_frac)) + '_measurement_var:' + str(float(measurement_var))
+            cur_out_dir = outdir + '_particle_count=' + str(num_particles) + 'super_res_factor=' + str(super_res_factor) + '_measurement_var:' + str(float(measurement_var))
             #cur_out_dir = 'test_path'
-            cur_out_dir = os.path.join(f'same_measurement_experiments_0.9', cur_out_dir)
+            cur_out_dir = os.path.join(f'/data/shivamgupta/diff_images_and_measurement_super_res_factor_4', cur_out_dir)
 
             try:
                 os.makedirs(cur_out_dir)
             except OSError as e:
                 pass
             latents = torch.randn([num_samples, num_particles, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+            #reconstructions = twisted_diffusion(super_res_utils.forward, measurement_var, measurements, num_samples, num_particles, num_channels, row_dim, col_dim, net, latents, True, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
+            reconstructions = twisted_diffusion(super_res_utils.forward, measurement_var, measurements, 1, num_particles, num_channels, row_dim, col_dim, net, latents, True, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
 
-            reconstructions = twisted_diffusion(inpainting_utils.forward, measurement_var, measurements, num_samples, num_particles, num_channels, row_dim, col_dim, net, latents, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
-
-            for batch_ind in range(batch_size):
+            #for batch_ind in range(len(reconstructions[0])):
+            for batch_ind in range(len(reconstructions)):
                 images_dict = {}
-                images_dict['truth'] = cur_image[0]
-                images_dict['measurement_adjoint'] = measurement_adjoint[0]
-                images_dict['recon'] = reconstructions[0][batch_ind]
-                images_dict['measurement'] = measurements[0]
+                images_dict['truth'] = img_batch[batch_ind]
+                #images_dict['measurement_adjoint'] = measurement_adjoint[0]
+                images_dict['recon'] = reconstructions[batch_ind]
+                images_dict['measurement'] = measurements[batch_ind]
                 #images_dict['truth'] = (img_batch[batch_ind] * 127.5 + 128).clip(0,255).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
                 #images_dict['measurement_adjoint'] = (measurement_adjoint[batch_ind] * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
                 #reconstructions_np = (reconstructions[batch_ind] * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
                 #for i, recon_np in enumerate(reconstructions_np):
                     #images_dict['recon'] = recon_np
-                images_dict['mask'] = masks[0]
+                #images_dict['mask'] = masks[0]
+                images_dict['super_res_factor'] = super_res_factor
                 images_dict['measurement_var'] = measurement_var
-                images_dict['noise frac'] = noise_frac
+                #images_dict['noise frac'] = noise_frac
                 images_dict['particle count'] = particle_count
-                pickle_path = os.path.join(cur_out_dir, f'image_{(ind + batch_ind):06d}_pickle')
+                #images_dict['sample_ind'] = ind + batch_ind//particle_count
+                #images_dict['particle_ind'] = batch_ind % particle_count
+                pickle_path = os.path.join(cur_out_dir, f'image_{ind:06d}_{batch_ind:06d}_pickle')
                 pickle_file = open(pickle_path, 'wb+')
                 pickle.dump(images_dict, pickle_file)
                 pickle_file.close()

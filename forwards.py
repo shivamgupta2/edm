@@ -36,7 +36,14 @@ class SuperResolution:
         num_channels = x.shape[1]
         dim = x.shape[-1]
         new_dim = dim//self.factor
-        helper_x = torch.reshape(x, (batch_size, num_channels, new_dim, self.factor, new_dim, self.factor))
+        self.helper_shape = (batch_size, num_channels, new_dim, self.factor, new_dim, self.factor)
+        helper_x = torch.reshape(x, self.helper_shape)
         res = torch.mean(helper_x, dim=(3, 5))
         return res
-   
+    
+    def adjoint(self, y):
+        y = torch.unsqueeze(y, 3)
+        y = torch.unsqueeze(y, 5)
+        y = y.expand(self.helper_shape)
+        print(y.shape)
+        return torch.reshape(y, self.x_shape)
