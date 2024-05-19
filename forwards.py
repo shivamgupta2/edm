@@ -74,15 +74,15 @@ class SuperResolution:
     
     def adjoint(self, y):
         print('xshape:', self.x_shape)
-        print('y shape:', y.shape)
-        y = torch.unsqueeze(y, 3)
-        y = torch.unsqueeze(y, 5)
-        helper_shape = (1, 3, 32, 32)
-        print('self.helper_shape', self.helper_shape)
-        y = y.expand(self.helper_shape)
+        helper_shape = y.shape[:-3] + (3, 32, 1, 32, 1)
+        x_shape = y.shape[:-3] + (3, 32, 32)
+        y = torch.unsqueeze(y, -2)
+        y = torch.unsqueeze(y, -1)
+        #y = torch.unsqueeze(y, 3)
+        #y = torch.unsqueeze(y, -1)
+        y = y.expand(helper_shape)/(32 * 32)
         #y = y.expand(helper_shape)
-        print(y.shape, 'xshape:', self.x_shape)
-        return torch.reshape(y, self.x_shape)
+        return torch.reshape(y, x_shape)
     
     def get_avg_values(self, x):
         return torch.mean(dim=(2, 3))

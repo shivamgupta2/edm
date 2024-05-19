@@ -398,10 +398,13 @@ def vectorized_gaussian_log_pdf(x, means, variance):
     #_, log_det = torch.linalg.slogdet(covariance)
     log_det = d * math.log(float(variance))
     #cov_inv = torch.linalg.inv(covariance)
+
     if x.shape == means.shape:
         deviations = x - means
     else:
-        deviations = x[:, None, None, :] - means
+        expanded_x = x.view(x.shape[0], *[1]*(means.dim()-2), x.shape[1])
+        deviations = expanded_x - means
+        #deviations = x[:, None, None, :] - means
     main_term = (torch.norm(deviations, dim=-1) ** 2)/variance
     logprobs = -0.5 * (constant + log_det + main_term)
     #logprobs = -0.5 * (constant + log_det + torch.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations))
@@ -419,7 +422,9 @@ def special_vectorized_gaussian_log_pdf(x, means, inv_cov_helper_f):
         deviations = x - means
     else:
         deviations = x[:, None, None, :] - means
-    main_term = torch.inner(deviations, inv_cov_helper_f(deviations))
+    deviations_flat = deviations.view(*deviations.shape[:-3], -1)
+    inv_cov_times_deviations_flat = inv_cov_helper_f(deviations).view(*deviations.shape[:-3], -1)
+    main_term = torch.sum(deviations_flat * inv_cov_times_deviations_flat, dim=-1)
     #main_term = (torch.norm(deviations, dim=-1) ** 2)/variance
     #logprobs = -0.5 * (constant + log_det + main_term)
     logprobs = -0.5 * (constant + main_term)
@@ -440,9 +445,14 @@ def vectorized_gaussian_score(measurement_A, x, means, var):
     return deviations/var
 
 def vectorized_random_choice(probs, device):
-    cumulative_probs = torch.cumsum(probs, dim=-1)[:, :, None, :]
-    unif_samples = torch.rand(probs.shape[0], probs.shape[1], probs.shape[2], device=device)
-    helper = cumulative_probs > unif_samples[:,:,:,None]
+    #cumulative_probs = torch.cumsum(probs, dim=-1)[:, :, None, :]
+    #unif_samples = torch.rand(probs.shape[0], probs.shape[1], probs.shape[2], device=device)
+    #helper = cumulative_probs > unif_samples[:,:,:,None]
+
+    cumulative_probs = torch.cumsum(probs, dim=-1)[:, None, :]
+    unif_samples = torch.rand(probs.shape[0], probs.shape[1], device=device)
+    helper = cumulative_probs > unif_samples[:, :, None]
+
     helper = helper.double()
     res = helper.argmax(dim=-1)
     return res
@@ -451,7 +461,7 @@ def vectorized_random_choice(probs, device):
 #Computes (meas_var * I + c * A^T A)^{-1} x where A is the downsampling matrix that downsamples to single color
 #Uses Sherman Morrison formula
 def song_particle_filter_inv_helper(x, meas_var, c):
-    dim = x.shape[-1]
+    dim = x.shape[-1] * x.shape[-2]
     #First matrix is identity/meas_var
     first_term = (1/meas_var) * x
     #Second matrix is the all ones matrix * -c/(dim * var * (dim * var + c))
@@ -460,11 +470,10 @@ def song_particle_filter_inv_helper(x, meas_var, c):
     x_entries_sum = torch.sum(x, dim=(-1, -2), keepdim=True)
     second_term = second_term_coeff * x_entries_sum
 
-    print('first term shape:', first_term.shape, 'second term shape:', second_term.shape)
     return first_term + second_term
 
 def song_particle_filter_cov_helper(x, meas_var, c):
-    dim = x.shape[-1]
+    dim = x.shape[-1] * x.shape[-2]
     #Diagonal term is I_d/meas_var
     diag_term = (1/meas_var)
     #rank one term is -c/(dim * var * (dim * var + c)) * u u^T, where u is all ones vector
@@ -609,8 +618,6 @@ def particle_filtering_sampler(super_res_util, measurement_var, y, num_samples, 
     #cur_samples = mvn.sample((num_samples, num_particles)) + x_N_cond_y_N_mean[:, None, :]
     cur_samples = noise + x_N_cond_y_N_mean[:, None, ...]
     
-    print('schedule:', t_steps)
-
     for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])): # 0, ..., N-1
         t_hat = sigma_inv(net.round_sigma(sigma(t_cur)))
         step_size = t_hat - t_next
@@ -648,14 +655,12 @@ def particle_filtering_sampler(super_res_util, measurement_var, y, num_samples, 
         #next_samples = mvn.sample((num_samples, num_particles)) + x_N_minus_it_means
         next_samples = x_N_minus_it_means + noise
 
+
         #resampling particles
         #log_probs = vectorized_gaussian_log_pdf(noisy_y[:,it,:], torch.einsum('ij,klj->kli', measurement_block_A, next_samples), measurement_var * torch.eye(num_channels*row_dim*col_dim, dtype=torch.double, device=latents.device))
         single_y_dim = torch.prod(torch.tensor(noisy_y[:,i,...].shape[1:]))
         single_x_dim = num_channels * row_dim * col_dim
-        print('next samples shape:', next_samples.shape)
-        print('noisy y shape:', noisy_y.shape)
         log_probs = vectorized_gaussian_log_pdf(noisy_y[:,i,...].view(num_samples, single_y_dim), super_res_util.forward(next_samples).view(num_samples, num_particles, single_y_dim), measurement_var)
-        print('log probs shape:', log_probs.shape)
         #log_probs += vectorized_gaussian_log_pdf(next_samples, cur_samples + step_size * uncond_score, step_size * torch.eye(num_channels * row_dim * col_dim, dtype=torch.double, device=latents.device))
         log_probs += vectorized_gaussian_log_pdf(next_samples.view(num_samples, num_particles, single_x_dim), (cur_samples + step_size * uncond_score).view(num_samples, num_particles, single_x_dim), step_size)
         #log_probs -= vectorized_gaussian_log_pdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
@@ -830,7 +835,7 @@ def generate_unconditional_samples(num_samples, batch_size, net, class_idx, devi
 
 
 
-def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda:2'), **sampler_kwargs):
+def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda:0'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -916,9 +921,13 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         class_labels[:, :] = 0
         class_labels[:, class_idx] = 1
 
-    reconstructions = particle_filtering_sampler(super_res_utils, measurement_var, measurements, 1, 1, num_channels, row_dim, col_dim, net, latents, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
+    adjoint_np = (super_res_utils.adjoint(measurements[0]) * (32 * 32) * 127.5 + 128).clip(0,255).to(torch.uint8).permute(1,2,0).cpu().numpy()
+    PIL.Image.fromarray(adjoint_np, 'RGB').save('test_adjoint.png')
+    reconstructions = particle_filtering_sampler(super_res_utils, measurement_var, measurements, 1, 5, num_channels, row_dim, col_dim, net, latents, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
+    print('one reconstructing')
     recon_np = (reconstructions[0] * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(1, 2, 0).cpu().numpy() 
     PIL.Image.fromarray(recon_np, 'RGB').save('test_recon.png')
+    print('done saving')
     exit()
     #particle_filtering_sampler(super_res_utils, measurement_var, measurements, 1, 1, num_channels, row_dim, col_dim, net, latents)
     #generate_unconditional_samples(num_images, batch_size, net, class_idx, device, sampler_kwargs, have_ablation_kwargs, '/data/shivamgupta/unconditional_samples')
