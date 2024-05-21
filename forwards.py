@@ -17,12 +17,11 @@ class Inpainting:
         return torch.reshape(temp_y, y_shape)
 
     def adjoint(self, y, device):
-        print('y shape:', y.shape)
         flattened_y = torch.flatten(y)
         res = torch.zeros(self.x_shape, device=device)
         batch_size = res.shape[0]
         for batch_ind in range(batch_size):
-            print('here:', res[batch_ind][:, self.masks[batch_ind]].shape, self.masks.shape)
+            #print('here:', res[batch_ind][:, self.masks[batch_ind]].shape, self.masks.shape)
             res[batch_ind][:, self.masks[batch_ind]] = y[batch_ind]
         return res
 
@@ -32,8 +31,8 @@ class SuperResolution:
         self.x_shape = x_shape
         batch_size = x_shape[0]
         num_channels = x_shape[1]
-        dim = x_shape[-1]
-        new_dim = dim//self.factor
+        self.dim = x_shape[-1]
+        new_dim = self.dim//self.factor
         self.helper_shape = (batch_size, num_channels, new_dim, self.factor, new_dim, self.factor)
 
     #def forward(self, x):
@@ -48,7 +47,6 @@ class SuperResolution:
     #    return res
 
     def forward(self, x):
-        print(f"Input shape: {x.shape}")
 
         # Get the shape of the input tensor
         original_shape = x.shape
@@ -73,14 +71,14 @@ class SuperResolution:
 
     
     def adjoint(self, y):
-        print('xshape:', self.x_shape)
-        helper_shape = y.shape[:-3] + (3, 32, 1, 32, 1)
+        new_dim = self.dim//self.factor
+        helper_shape = y.shape[:-3] + (3, new_dim, self.factor, new_dim, self.factor)
         x_shape = y.shape[:-3] + (3, 32, 32)
         y = torch.unsqueeze(y, -2)
         y = torch.unsqueeze(y, -1)
         #y = torch.unsqueeze(y, 3)
         #y = torch.unsqueeze(y, -1)
-        y = y.expand(helper_shape)/(32 * 32)
+        y = y.expand(helper_shape)/(self.factor * self.factor)
         #y = y.expand(helper_shape)
         return torch.reshape(y, x_shape)
     
