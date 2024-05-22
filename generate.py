@@ -462,7 +462,7 @@ def vectorized_random_choice(probs, device):
 #Uses Sherman Morrison formula
 def song_particle_filter_inv_helper(x, meas_var, c, super_res_factor):
     new_dim = x.shape[-1]//super_res_factor
-    new_shape = x.shape[:-3] + (x.shape[-3], new_dim, new_dim, super_res_factor, super_res_factor)
+    new_shape = x.shape[:-3] + (x.shape[-3], new_dim, super_res_factor, new_dim, super_res_factor)
     sq_factor = super_res_factor * super_res_factor
     reshaped_x = torch.reshape(x, new_shape)
     #First matrix is identity/meas_var
@@ -470,14 +470,14 @@ def song_particle_filter_inv_helper(x, meas_var, c, super_res_factor):
     #Second matrix is the all ones matrix * -c/(dim * var * (dim * var + c))
     second_term_coeff = -c/(sq_factor * meas_var * (c + sq_factor * meas_var))
 
-    x_entries_sum = torch.sum(reshaped_x, dim=(-1, -2), keepdim=True)
+    x_entries_sum = torch.sum(reshaped_x, dim=(-1, -3), keepdim=True)
     second_term = second_term_coeff * x_entries_sum
 
     return torch.reshape(first_term + second_term, x.shape)
 
 def song_particle_filter_cov_helper(x, meas_var, c, super_res_factor):
     new_dim = x.shape[-1]//super_res_factor
-    new_shape = x.shape[:-3] + (x.shape[-3], new_dim, new_dim, super_res_factor, super_res_factor)
+    new_shape = x.shape[:-3] + (x.shape[-3], new_dim, super_res_factor, new_dim, super_res_factor)
     sq_factor = super_res_factor * super_res_factor
     reshaped_x = torch.reshape(x, new_shape)
     #Diagonal term is I_d/meas_var
@@ -489,7 +489,7 @@ def song_particle_filter_cov_helper(x, meas_var, c, super_res_factor):
     #rank one term  is the below coeff * matrix of all ones
     sqrt_rank_one_coeff = (math.sqrt(rank_one_coeff * sq_factor/diag_coeff + 1) - 1)/(rank_one_coeff * sq_factor/diag_coeff) * math.sqrt(meas_var) * rank_one_coeff
 
-    x_entries_sum = torch.sum(reshaped_x, dim=(-1, -2), keepdim=True)
+    x_entries_sum = torch.sum(reshaped_x, dim=(-1, -3), keepdim=True)
     second_term = sqrt_rank_one_coeff * x_entries_sum
 
     return torch.reshape(sqrt_diag_term + second_term, x.shape)
@@ -615,9 +615,6 @@ def particle_filtering_sampler(super_res_util, measurement_var, y, num_samples, 
     helper_adjoint = t_steps[0] * super_res_util.adjoint(noisy_y[:, :, 0, ...])
     x_N_cond_y_N_mean = song_particle_filter_inv_helper(helper_adjoint, measurement_var, t_steps[0], super_res_factor)
 
-    d = globals()
-    d.update(locals())
-    code.interact(local=d)
     #x_N_cond_y_N_cov = (t_steps[0] * measurement_var) * torch.linalg.inv(measurement_var * torch.eye(num_channels * row_dim * col_dim, device=latents.device) + t_steps[0] * torch.matmul(measurement_block_A.T, measurement_block_A))
     #print(x_N_cond_y_N_cov.type())
 
@@ -678,7 +675,7 @@ def particle_filtering_sampler(super_res_util, measurement_var, y, num_samples, 
         #log_probs -= vectorized_gaussian_log_pdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
         log_probs -= special_vectorized_gaussian_log_pdf(next_samples, x_N_minus_it_means, partial(song_particle_filter_inv_cov_helper, meas_var=measurement_var, c=step_size, super_res_util=super_res_util))
         if corrected_weighting:
-            log_probs -= vectorized_gaussian_log_pdf(noisy_y[:,:,it-1,...].view(y.shape[0], num_samples, single_y_dim), super_res_util.forward(cur_samples).view(y.shape[0], num_samples, num_particles, single_y_dim), measurement_var)
+            log_probs -= vectorized_gaussian_log_pdf(noisy_y[:,:,it-1,...].view(y.shape[0], num_samples, single_y_dim), super_res_util.forward(next_samples).view(y.shape[0], num_samples, num_particles, single_y_dim), measurement_var)
 
         probs = torch.exp(log_probs)
         probs /= torch.sum(probs, dim=-1, keepdim=True)
@@ -854,7 +851,7 @@ def save_image(image_tensor, filename):
 
 
 
-def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda:3'), **sampler_kwargs):
+def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda:0'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -895,7 +892,7 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     #num_images = 100000
     particle_count = 5
     batch_size = 4
-    num_images = 1000000
+    num_images = 10000000
     noise_frac = 0.9
     #measurement_var = 0.1
     measurement_var = 0.02
@@ -923,7 +920,8 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     #masks[0] = mask
     #super_res_factor = 8
     #super_res_factor = 8
-    super_res_factor = 8
+    #super_res_factor = 32
+    super_res_factor = 32
     small_res_dim = row_dim//super_res_factor
     super_res_utils = SuperResolution(super_res_factor, (batch_size, num_channels, row_dim, col_dim))
     
@@ -1027,34 +1025,40 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         class_labels[:, :] = 0
         class_labels[:, class_idx] = 1
 
-    for particle_count in [75, 100]:
+    for particle_count in [100]:
         #batch_size = int(500/particle_count)
         #batch_size = 512//particle_count
-        batch_size = 1
+        batch_size = 2048//particle_count
+        #batch_size = 1
         super_res_utils = SuperResolution(super_res_factor, (batch_size, num_channels, row_dim, col_dim))
-        for ind in range(1000, num_images, batch_size):
-            #print('batch_size here:', batch_size, ', particle size here:', particle_count)
+        for ind in range(20000, num_images, batch_size):
+            print('batch_size here:', batch_size, ', particle size here:', particle_count)
             #path = './CIFAR-10-images/train/**/*.jpg'
-            #path = './CIFAR-10-images/test/cat/**/*.jpg'
-            #img_batch = torch.zeros((batch_size, num_channels, row_dim, col_dim), device=device)
-            #for batch_ind in range(batch_size):
-            #    k = random.choice(glob.glob(path, recursive=True))
-            #    print(k)
-            #    img = PIL.Image.open(k)
-            #    cur_image = TF.to_tensor(img)
-            #    cur_image = (cur_image - 0.5) * 2
-            #    img_batch[batch_ind] = cur_image
+            path = './CIFAR-10-images/test/cat/**/*.jpg'
+            img_batch = torch.zeros((batch_size, num_channels, row_dim, col_dim), device=device)
+            for batch_ind in range(batch_size):
+                k = random.choice(glob.glob(path, recursive=True))
+                print(k)
+                img = PIL.Image.open(k)
+                cur_image = TF.to_tensor(img)
+                cur_image = (cur_image - 0.5) * 2
+                img_batch[batch_ind] = cur_image
+            
             #torch.distributed.barrier()
 
             latents = torch.randn([1,], device=device)
 
-            sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-            latents = torch.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
-            images = sampler_fn(net, latents, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
+            #sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
+            #latents = torch.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+            #images = sampler_fn(net, latents, class_labels, randn_like=torch.randn_like, **sampler_kwargs)
             noise = math.sqrt(measurement_var) * torch.randn((batch_size, num_channels, small_res_dim, small_res_dim), device=device)
-            measurements = super_res_utils.forward(images) + noise
-
-            save_image(super_res_utils.adjoint(measurements[0]) * (super_res_factor ** 2), 'adjoint.png')
+            ##measurements = super_res_utils.forward(img_batch) + noise
+            measurements = super_res_utils.forward(img_batch) + noise
+            
+            #save_image(images[0], 'uncond_sample_diagram.png')
+            #save_image(super_res_utils.adjoint(measurements[0]) * super_res_factor * super_res_factor, 'uncond_measurement_diagram.png')
+            #save_image(img_batch[0], 'truth_diagram.png')
+            #save_image(measurements[0], 'measurement_diagram.png')
 
 
             #batch_seeds = torch.tensor([0, 1], device=device)
@@ -1102,13 +1106,14 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
             #cur_out_dir = os.path.join(f'/data/shivamgupta/unconditional_different_image_and_measurement_1_super_res_factor_32_meas_var_0.02', cur_out_dir)
 
             #cur_out_dir = os.path.join(f'/data/shivamgupta/song_corrected_weighting_different_image_and_measurement_1_super_res_factor_32_meas_var_0.02', cur_out_dir)
-            #cur_out_dir = os.path.join(f'/data/shivamgupta/song_corrected_weighting_cat_conditional_sampling_super_res_factor_32_meas_var_0.02', cur_out_dir)
+            cur_out_dir = os.path.join(f'/data/shivamgupta/song_corrected_weighting_cat_conditional_sampling_super_res_factor_32_meas_var_0.02', cur_out_dir)
 
             #cur_out_dir = os.path.join(f'/data/shivamgupta/twisted_unconditional_from_samples_super_res_factor_8_meas_var_0.02', cur_out_dir)
             #cur_out_dir = os.path.join(f'/data/shivamgupta/song_unconditional_from_samples_super_res_factor_8_meas_var_0.02', cur_out_dir)
             #cur_out_dir = os.path.join(f'/data/shivamgupta/song_unconditional_from_samples_super_res_factor_8_meas_var_0.02', cur_out_dir)
+            #cur_out_dir = os.path.join(f'/data/shivamgupta/song_unconditional_from_samples_super_res_factor_32_meas_var_0.02', cur_out_dir)
             
-            cur_out_dir = os.path.join(f'/data/shivamgupta/twisted_unconditional_from_samples_super_res_factor_32_meas_var_0.02', cur_out_dir)
+            #cur_out_dir = os.path.join(f'/data/shivamgupta/twisted_unconditional_from_samples_super_res_factor_32_meas_var_0.02', cur_out_dir)
 
             #cur_out_dir = os.path.join(f'/data/shivamgupta/song_incorrect_weighting_cat_conditional_sampling_super_res_factor_32_meas_var_0.02', cur_out_dir)
 
@@ -1125,9 +1130,13 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
             #reconstructions = particle_filtering_sampler(super_res_utils, measurement_var, measurements, 1, num_particles, num_channels, row_dim, col_dim, net, latents, super_res_factor, corrected_weighting=False, class_labels=class_labels, randn_like=torch.randn_like, **sampler_kwargs)
             reconstructions = particle_filtering_sampler(super_res_utils, measurement_var, measurements, 1, num_particles, num_channels, row_dim, col_dim, net, latents, super_res_factor, corrected_weighting=True, class_labels=class_labels, randn_like=torch.randn_like, **sampler_kwargs)
 
-            save_image(reconstructions[0,0,0], 'reconstruction.png')
+
+            #rej_cond_samples = rejection_sampler(measurements, super_res_utils.forward, measurement_var, small_res_dim, 1, batch_size, net, class_idx, device, sampler_kwargs, have_ablation_kwargs)
+
+            #save_image(rej_cond_samples[0], 'rejection_diagram.png')
+
+
             #for batch_ind in range(len(reconstructions)):
-            exit()
             images_dict = {}
             #images_dict['truth'] = img_batch[batch_ind]
             #images_dict['measurement_adjoint'] = measurement_adjoint[0]
